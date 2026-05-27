@@ -1310,9 +1310,26 @@
         background: #e2eaf5;
       }
 
+      button[disabled] {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      button[data-copied="true"] {
+        border-color: #1f8f5f;
+        background: #e6f6ee;
+        color: #176844;
+      }
+
       button:focus-visible {
         outline: 3px solid rgba(47, 111, 235, 0.25);
         outline-offset: 2px;
+      }
+
+      .output-shell[data-state="error"] pre {
+        border-color: #d45142;
+        background: #fff7f5;
+        color: #5b1d16;
       }
 
       svg {
@@ -1356,7 +1373,117 @@
     constructor() {
       super();
       this.attachShadow({ mode: "open" }).append(template.content.cloneNode(true));
+      this.currentSchemaText = "";
+      this.copyTimer = 0;
+      this.handleInput = this.handleInput.bind(this);
+      this.handleCopy = this.handleCopy.bind(this);
     }
+
+    connectedCallback() {
+      this.source = this.shadowRoot.getElementById("source");
+      this.output = this.shadowRoot.getElementById("output");
+      this.outputShell = this.shadowRoot.querySelector(".output-shell");
+      this.copyButton = this.shadowRoot.querySelector("button");
+
+      if (!this.source.value.trim()) {
+        this.source.value = this.getAttribute("value") || DEFAULT_SAMPLE;
+      }
+
+      this.source.addEventListener("input", this.handleInput);
+      this.copyButton.addEventListener("click", this.handleCopy);
+      this.updateSchema();
+    }
+
+    disconnectedCallback() {
+      this.source.removeEventListener("input", this.handleInput);
+      this.copyButton.removeEventListener("click", this.handleCopy);
+      clearTimeout(this.copyTimer);
+    }
+
+    handleInput() {
+      this.updateSchema();
+    }
+
+    updateSchema() {
+      const input = this.source.value.trim();
+
+      if (!input) {
+        this.currentSchemaText = "";
+        this.output.textContent = EMPTY_OUTPUT;
+        this.outputShell.dataset.state = "empty";
+        this.copyButton.disabled = true;
+        return;
+      }
+
+      try {
+        const schema = convertCsharpToJsonSchema(input);
+        this.currentSchemaText = formatSchema(schema);
+        this.output.textContent = this.currentSchemaText;
+        this.outputShell.dataset.state = "ready";
+        this.copyButton.disabled = false;
+      } catch (error) {
+        this.currentSchemaText = "";
+        this.output.textContent = formatSchema(formatConversionError(error));
+        this.outputShell.dataset.state = "error";
+        this.copyButton.disabled = true;
+      }
+    }
+
+    async handleCopy() {
+      if (!this.currentSchemaText) {
+        return;
+      }
+
+      await copyText(this.currentSchemaText);
+      this.markCopied();
+    }
+
+    markCopied() {
+      this.copyButton.dataset.copied = "true";
+      this.copyButton.title = "Copied";
+      this.copyButton.setAttribute("aria-label", "Copied");
+      clearTimeout(this.copyTimer);
+      this.copyTimer = setTimeout(() => {
+        this.copyButton.dataset.copied = "false";
+        this.copyButton.title = "Copy JSON Schema";
+        this.copyButton.setAttribute("aria-label", "Copy JSON Schema");
+      }, 1500);
+    }
+  }
+
+  function formatConversionError(error) {
+    if (error instanceof SchemaConversionError) {
+      return {
+        code: error.code,
+        path: error.path,
+        message: error.message,
+      };
+    }
+
+    return {
+      code: "UnexpectedError",
+      path: "$",
+      message: error && error.message
+        ? error.message
+        : "Unexpected conversion failure.",
+    };
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
   }
 
   if (!globalScope.customElements.get("csharp-json-schema-converter")) {
