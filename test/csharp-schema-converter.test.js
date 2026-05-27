@@ -1,13 +1,13 @@
-const test = require("node:test");
-const assert = require("node:assert/strict");
+import test from "node:test";
+import assert from "node:assert/strict";
 
-const {
+import {
   SchemaConversionError,
   convertCsharpToJsonSchema,
   DEFAULT_SAMPLE,
   highlightCsharp,
   highlightJson,
-} = require("../src/csharp-schema-converter");
+} from "../src/csharp-schema-converter.js";
 
 test("generates a structured outputs compatible schema for the sample model", () => {
   const schema = convertCsharpToJsonSchema(DEFAULT_SAMPLE);

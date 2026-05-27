@@ -16,6 +16,18 @@
 <csharp-json-schema-converter></csharp-json-schema-converter>
 ```
 
+如果需要在 JavaScript 中直接使用轉換函式，可用 ESM import：
+
+```js
+import {
+  convertCsharpToJsonSchema,
+  formatSchema,
+} from "/assets/components/csharp-schema-converter.js";
+
+const schema = convertCsharpToJsonSchema(csharpSource);
+console.log(formatSchema(schema));
+```
+
 如果只是本機試用，也可以直接用瀏覽器開啟 [index.html](./index.html)。
 
 ## 功能

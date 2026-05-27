@@ -1,4 +1,4 @@
-(function initCsharpSchemaConverter(globalScope) {
+const CsharpSchemaConverterApi = (function initCsharpSchemaConverter(globalScope) {
   const INTEGER_TYPES = new Set([
     "byte",
     "sbyte",
@@ -1398,14 +1398,10 @@
     EMPTY_OUTPUT,
   };
 
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = api;
-  }
-
   globalScope.CsharpSchemaConverter = api;
 
   if (!globalScope.document || !globalScope.customElements) {
-    return;
+    return api;
   }
 
   const template = document.createElement("template");
@@ -1782,4 +1778,19 @@
       CsharpJsonSchemaConverter,
     );
   }
+  return api;
 })(typeof window !== "undefined" ? window : globalThis);
+
+export const {
+  SchemaConversionError,
+  convertCsharpToJsonSchema,
+  formatSchema,
+  highlightCsharp,
+  highlightJson,
+  parseCsharpSource,
+  parseType,
+  DEFAULT_SAMPLE,
+  EMPTY_OUTPUT,
+} = CsharpSchemaConverterApi;
+
+export default CsharpSchemaConverterApi;
