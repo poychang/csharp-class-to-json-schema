@@ -1,4 +1,1232 @@
-(function registerCsharpSchemaConverter(globalScope) {
+(function initCsharpSchemaConverter(globalScope) {
+  const INTEGER_TYPES = new Set([
+    "byte",
+    "sbyte",
+    "short",
+    "ushort",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+  ]);
+
+  const NUMBER_TYPES = new Set(["float", "double", "decimal"]);
+  const COLLECTION_TYPES = new Set([
+    "List",
+    "IList",
+    "IReadOnlyList",
+    "ICollection",
+    "IEnumerable",
+  ]);
+  const DICTIONARY_TYPES = new Set([
+    "Dictionary",
+    "IDictionary",
+    "IReadOnlyDictionary",
+    "SortedDictionary",
+  ]);
+  const UNSUPPORTED_TYPES = new Set(["object", "dynamic"]);
+  const ALLOWED_SCHEMA_KEYS = new Set([
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "enum",
+    "anyOf",
+    "$defs",
+    "$ref",
+    "description",
+  ]);
+  const ALLOWED_TYPES = new Set([
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "object",
+    "array",
+    "null",
+  ]);
+
+  const DEFAULT_OPTIONS = {
+    includeFields: false,
+    propertyNamingPolicy: "camelCase",
+  };
+
+  const EMPTY_OUTPUT = "Paste a C# class to generate JSON Schema.";
+
+  const DEFAULT_SAMPLE = [
+    "using System.ComponentModel;",
+    "using System.Text.Json.Serialization;",
+    "",
+    "public sealed class CalendarEventResponse",
+    "{",
+    "    [JsonPropertyName(\"event_name\")]",
+    "    [Description(\"Name of the calendar event.\")]",
+    "    public required string Name { get; init; }",
+    "",
+    "    [Description(\"Event date. Use yyyy-MM-dd.\")]",
+    "    public required DateOnly Date { get; init; }",
+    "",
+    "    public string? Location { get; init; }",
+    "",
+    "    public required List<Person> Participants { get; init; }",
+    "}",
+    "",
+    "public sealed class Person",
+    "{",
+    "    public required string Name { get; init; }",
+    "    public string? Email { get; init; }",
+    "}",
+  ].join("\n");
+
+  class SchemaConversionError extends Error {
+    constructor(code, path, message) {
+      super(message);
+      this.name = "SchemaConversionError";
+      this.code = code;
+      this.path = path;
+    }
+  }
+
+  function convertCsharpToJsonSchema(source, options) {
+    const normalizedOptions = normalizeOptions(options);
+    const parsed = parseCsharpSource(source, normalizedOptions);
+
+    if (!parsed.rootModel) {
+      throw new SchemaConversionError(
+        "RootMustBeObject",
+        "$",
+        "Input must contain at least one C# class, record class, or record model.",
+      );
+    }
+
+    const context = {
+      options: normalizedOptions,
+      rootName: parsed.rootModel.name,
+      modelsByName: parsed.modelsByName,
+      enumsByName: parsed.enumsByName,
+      defs: {},
+      builtDefs: new Set(),
+      buildingDefs: new Set(),
+      propertyCount: 0,
+      maxDepth: 1,
+    };
+
+    const schema = buildObjectSchema(parsed.rootModel, context, "$", 1);
+    if (Object.keys(context.defs).length > 0) {
+      schema.$defs = context.defs;
+    }
+
+    if (context.propertyCount > 100) {
+      throw new SchemaConversionError(
+        "ExceededPropertyLimit",
+        "$",
+        `Object property count ${context.propertyCount} exceeds the Azure OpenAI limit of 100.`,
+      );
+    }
+
+    if (context.maxDepth > 5) {
+      throw new SchemaConversionError(
+        "ExceededNestingDepth",
+        "$",
+        `Object nesting depth ${context.maxDepth} exceeds the Azure OpenAI limit of 5.`,
+      );
+    }
+
+    validateSchemaSubset(schema);
+    return schema;
+  }
+
+  function normalizeOptions(options) {
+    return Object.assign({}, DEFAULT_OPTIONS, options || {});
+  }
+
+  function parseCsharpSource(source, options) {
+    const text = String(source || "");
+    const masked = maskCommentsAndStrings(text);
+    const declarations = findTypeDeclarations(text, masked);
+    const enumModels = declarations
+      .filter((declaration) => declaration.kind === "enum")
+      .map((declaration) => ({
+        name: declaration.name,
+        values: parseEnumValues(declaration.body),
+        declaration,
+      }));
+
+    const classModels = declarations
+      .filter((declaration) => declaration.kind !== "enum")
+      .map((declaration) => ({
+        name: declaration.name,
+        kind: declaration.kind,
+        nested: isNestedDeclaration(declaration, declarations),
+        members: parseModelMembers(text, declaration, declarations, options),
+        declaration,
+      }));
+
+    const modelsByName = new Map();
+    const enumsByName = new Map();
+
+    for (const model of classModels) {
+      if (!modelsByName.has(model.name)) {
+        modelsByName.set(model.name, model);
+      }
+    }
+
+    for (const model of enumModels) {
+      if (!enumsByName.has(model.name)) {
+        enumsByName.set(model.name, model);
+      }
+    }
+
+    const rootModel =
+      classModels.find((model) => !model.nested) || classModels[0] || null;
+
+    return {
+      rootModel,
+      models: classModels,
+      enums: enumModels,
+      modelsByName,
+      enumsByName,
+    };
+  }
+
+  function findTypeDeclarations(source, masked) {
+    const declarations = [];
+    const typePattern =
+      /\b(?:(?:public|internal|private|protected|sealed|abstract|static|partial|readonly|file|new)\s+)*(record\s+class|record|class|enum)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<[^>{}()]+>)?/g;
+    let match;
+
+    while ((match = typePattern.exec(masked)) !== null) {
+      const kind = match[1].replace(/\s+/g, " ");
+      const name = match[2];
+      const start = match.index;
+      const afterName = typePattern.lastIndex;
+      const primaryParams = readPrimaryConstructorParams(source, masked, afterName);
+      const openBrace = masked.indexOf("{", afterName);
+      const semicolon = masked.indexOf(";", afterName);
+
+      if (openBrace === -1 || (semicolon !== -1 && semicolon < openBrace)) {
+        if (kind === "record" && primaryParams) {
+          declarations.push({
+            kind,
+            name,
+            start,
+            body: "",
+            bodyStart: afterName,
+            bodyEnd: afterName,
+            end: primaryParams.end,
+            primaryParams: primaryParams.text,
+          });
+        }
+        continue;
+      }
+
+      const closeBrace = findMatchingBrace(masked, openBrace);
+      if (closeBrace === -1) {
+        continue;
+      }
+
+      declarations.push({
+        kind,
+        name,
+        start,
+        body: source.slice(openBrace + 1, closeBrace),
+        bodyStart: openBrace + 1,
+        bodyEnd: closeBrace,
+        end: closeBrace + 1,
+        primaryParams: primaryParams ? primaryParams.text : "",
+      });
+    }
+
+    return declarations.sort((left, right) => left.start - right.start);
+  }
+
+  function readPrimaryConstructorParams(source, masked, startIndex) {
+    let cursor = startIndex;
+    while (cursor < masked.length && /\s/.test(masked[cursor])) {
+      cursor += 1;
+    }
+
+    if (masked[cursor] !== "(") {
+      return null;
+    }
+
+    const end = findMatchingParen(masked, cursor);
+    if (end === -1) {
+      return null;
+    }
+
+    return {
+      text: source.slice(cursor + 1, end),
+      end: end + 1,
+    };
+  }
+
+  function isNestedDeclaration(declaration, declarations) {
+    return declarations.some(
+      (candidate) =>
+        candidate !== declaration &&
+        candidate.kind !== "enum" &&
+        declaration.start > candidate.bodyStart &&
+        declaration.end < candidate.bodyEnd,
+    );
+  }
+
+  function parseEnumValues(body) {
+    return splitTopLevel(body, ",")
+      .map((segment) => {
+        const enumMemberValue = extractAttributeString(
+          segment,
+          "EnumMember",
+          "Value",
+        );
+        const cleaned = segment.replace(/\[[\s\S]*?\]/g, "").trim();
+        const match = cleaned.match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+        if (!match) {
+          return null;
+        }
+
+        return enumMemberValue || match[1];
+      })
+      .filter(Boolean);
+  }
+
+  function parseModelMembers(source, declaration, declarations, options) {
+    const members = [];
+    const primaryMembers = parsePrimaryRecordMembers(declaration.primaryParams);
+    const body = declaration.body || "";
+    const localNestedRanges = declarations
+      .filter(
+        (candidate) =>
+          candidate !== declaration &&
+          candidate.start > declaration.bodyStart &&
+          candidate.end < declaration.bodyEnd,
+      )
+      .map((candidate) => ({
+        start: candidate.start - declaration.bodyStart,
+        end: candidate.end - declaration.bodyStart,
+      }));
+    const bodyWithoutNested = blankRanges(body, localNestedRanges);
+
+    for (const member of primaryMembers) {
+      addMemberIfSupported(members, member, options);
+    }
+
+    const propertyPattern =
+      /(?<prefix>(?:(?:\s*\/\/\/[^\r\n]*(?:\r?\n|$))|(?:\s*\[[^\]]+\]\s*))*?)\bpublic\s+(?!static\b)(?:(?:virtual|override|abstract|sealed|new|required|readonly|unsafe|partial)\s+)*(?<type>[A-Za-z_][A-Za-z0-9_.:]*(?:\s*<[^;{}]+>)?(?:\s*\[\])?\s*\??)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?<accessors>[^{}]*)\}/g;
+    let match;
+
+    while ((match = propertyPattern.exec(bodyWithoutNested)) !== null) {
+      const groups = match.groups || {};
+      const prefix = groups.prefix || "";
+      const accessors = groups.accessors || "";
+
+      if (!hasPublicGetter(accessors) || hasAttribute(prefix, "JsonIgnore")) {
+        continue;
+      }
+
+      addMemberIfSupported(
+        members,
+        {
+          name: groups.name,
+          type: groups.type,
+          attributes: prefix,
+          description: extractDescription(prefix),
+        },
+        options,
+      );
+    }
+
+    if (options.includeFields) {
+      parsePublicFields(bodyWithoutNested, members, options);
+    }
+
+    return members;
+  }
+
+  function parsePrimaryRecordMembers(primaryParams) {
+    if (!primaryParams) {
+      return [];
+    }
+
+    return splitTopLevel(primaryParams, ",")
+      .map((segment) => {
+        const withoutDefault = stripTopLevelAssignment(segment).trim();
+        if (!withoutDefault) {
+          return null;
+        }
+
+        const attributes = (withoutDefault.match(/\[[\s\S]*?\]/g) || []).join(
+          "\n",
+        );
+        const cleaned = withoutDefault.replace(/\[[\s\S]*?\]/g, "").trim();
+        const match = cleaned.match(/^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+        if (!match) {
+          return null;
+        }
+
+        return {
+          name: match[2],
+          type: match[1],
+          attributes,
+          description: extractDescription(attributes),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function parsePublicFields(body, members, options) {
+    const fieldPattern =
+      /(?<prefix>(?:(?:\s*\/\/\/[^\r\n]*(?:\r?\n|$))|(?:\s*\[[^\]]+\]\s*))*?)\bpublic\s+(?!static\b)(?:(?:readonly|required|new)\s+)*(?<type>[A-Za-z_][A-Za-z0-9_.:]*(?:\s*<[^;{}]+>)?(?:\s*\[\])?\s*\??)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*[^;]+)?;/g;
+    let match;
+
+    while ((match = fieldPattern.exec(body)) !== null) {
+      const groups = match.groups || {};
+      const prefix = groups.prefix || "";
+      if (hasAttribute(prefix, "JsonIgnore")) {
+        continue;
+      }
+
+      addMemberIfSupported(
+        members,
+        {
+          name: groups.name,
+          type: groups.type,
+          attributes: prefix,
+          description: extractDescription(prefix),
+        },
+        options,
+      );
+    }
+  }
+
+  function addMemberIfSupported(members, member, options) {
+    const jsonName =
+      extractAttributeString(member.attributes, "JsonPropertyName") ||
+      applyNamingPolicy(member.name, options.propertyNamingPolicy);
+
+    members.push({
+      name: member.name,
+      jsonName,
+      type: member.type.trim(),
+      description: member.description || "",
+    });
+  }
+
+  function hasPublicGetter(accessors) {
+    if (!/\bget\s*;/.test(accessors)) {
+      return false;
+    }
+
+    return !/\b(?:private|protected|internal)\s+get\s*;/.test(accessors);
+  }
+
+  function hasAttribute(text, attributeName) {
+    const pattern = new RegExp(`\\b${attributeName}(?:Attribute)?\\b`);
+    return pattern.test(text || "");
+  }
+
+  function extractDescription(prefix) {
+    return (
+      extractAttributeString(prefix, "Description") ||
+      extractXmlSummary(prefix) ||
+      ""
+    );
+  }
+
+  function extractAttributeString(text, attributeName, namedArgument) {
+    if (!text) {
+      return "";
+    }
+
+    const attributePattern = new RegExp(
+      `${attributeName}(?:Attribute)?\\s*\\(([^\\)]*)\\)`,
+      "s",
+    );
+    const match = text.match(attributePattern);
+    if (!match) {
+      return "";
+    }
+
+    const args = match[1];
+    let valuePattern;
+    if (namedArgument) {
+      valuePattern = new RegExp(
+        `\\b${namedArgument}\\s*=\\s*\"((?:\\\\.|[^\"\\\\])*)\"`,
+        "s",
+      );
+    } else {
+      valuePattern = /"((?:\\.|[^"\\])*)"/s;
+    }
+
+    const valueMatch = args.match(valuePattern);
+    return valueMatch ? unescapeCsharpString(valueMatch[1]) : "";
+  }
+
+  function extractXmlSummary(prefix) {
+    const lines = String(prefix || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("///"))
+      .map((line) => line.replace(/^\/\/\/\s?/, "").trim());
+
+    if (lines.length === 0) {
+      return "";
+    }
+
+    const joined = lines.join(" ");
+    const summaryMatch = joined.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/);
+    return normalizeSpaces(summaryMatch ? summaryMatch[1] : joined);
+  }
+
+  function unescapeCsharpString(value) {
+    return value
+      .replace(/\\"/g, "\"")
+      .replace(/\\\\/g, "\\")
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t");
+  }
+
+  function applyNamingPolicy(name, policy) {
+    if (policy !== "camelCase") {
+      return name;
+    }
+
+    if (!name) {
+      return name;
+    }
+
+    return name[0].toLowerCase() + name.slice(1);
+  }
+
+  function buildObjectSchema(model, context, path, depth) {
+    context.maxDepth = Math.max(context.maxDepth, depth);
+
+    if (depth > 5) {
+      throw new SchemaConversionError(
+        "ExceededNestingDepth",
+        path,
+        `Object nesting depth ${depth} exceeds the Azure OpenAI limit of 5.`,
+      );
+    }
+
+    const properties = {};
+    const required = [];
+    const seenNames = new Map();
+
+    for (const member of model.members) {
+      if (seenNames.has(member.jsonName)) {
+        throw new SchemaConversionError(
+          "SerializationNameConflict",
+          `${path}.${member.jsonName}`,
+          `Members '${seenNames.get(member.jsonName)}' and '${member.name}' both serialize as '${member.jsonName}'.`,
+        );
+      }
+
+      seenNames.set(member.jsonName, member.name);
+      properties[member.jsonName] = buildSchemaForType(
+        parseType(member.type),
+        context,
+        `${path}.${member.jsonName}`,
+        depth + 1,
+      );
+
+      if (member.description) {
+        properties[member.jsonName].description = member.description;
+      }
+
+      required.push(member.jsonName);
+    }
+
+    context.propertyCount += required.length;
+
+    return {
+      type: "object",
+      properties,
+      required,
+      additionalProperties: false,
+    };
+  }
+
+  function buildSchemaForType(parsedType, context, path, objectDepth) {
+    const schema = buildNonNullableSchemaForType(
+      parsedType,
+      context,
+      path,
+      objectDepth,
+    );
+
+    return applyNullable(schema, parsedType.nullable);
+  }
+
+  function buildNonNullableSchemaForType(parsedType, context, path, objectDepth) {
+    if (parsedType.kind === "array") {
+      return {
+        type: "array",
+        items: buildSchemaForType(
+          parsedType.element,
+          context,
+          `${path}[]`,
+          objectDepth,
+        ),
+      };
+    }
+
+    if (parsedType.kind === "generic") {
+      if (DICTIONARY_TYPES.has(parsedType.name)) {
+        throw new SchemaConversionError(
+          "UnsupportedDictionary",
+          path,
+          `${parsedType.raw} cannot be represented because Structured Outputs requires additionalProperties: false. Use a key-value array model instead.`,
+        );
+      }
+
+      if (COLLECTION_TYPES.has(parsedType.name)) {
+        return {
+          type: "array",
+          items: buildSchemaForType(
+            parsedType.args[0],
+            context,
+            `${path}[]`,
+            objectDepth,
+          ),
+        };
+      }
+
+      throw new SchemaConversionError(
+        "UnsupportedType",
+        path,
+        `${parsedType.raw} is not a supported generic model type.`,
+      );
+    }
+
+    const name = parsedType.name;
+    if (UNSUPPORTED_TYPES.has(name)) {
+      throw new SchemaConversionError(
+        "UnsupportedType",
+        path,
+        `${parsedType.raw} is not supported. Use a concrete model type instead.`,
+      );
+    }
+
+    if (name === "string") {
+      return { type: "string" };
+    }
+
+    if (name === "char") {
+      return {
+        type: "string",
+        description: "Single character string.",
+      };
+    }
+
+    if (name === "bool" || name === "Boolean") {
+      return { type: "boolean" };
+    }
+
+    if (INTEGER_TYPES.has(name)) {
+      return { type: "integer" };
+    }
+
+    if (NUMBER_TYPES.has(name)) {
+      return { type: "number" };
+    }
+
+    if (name === "Guid") {
+      return {
+        type: "string",
+        description: "GUID string.",
+      };
+    }
+
+    if (name === "DateTime") {
+      return {
+        type: "string",
+        description: "Date and time string.",
+      };
+    }
+
+    if (name === "DateTimeOffset") {
+      return {
+        type: "string",
+        description: "Date and time with offset string.",
+      };
+    }
+
+    if (name === "DateOnly") {
+      return {
+        type: "string",
+        description: "Date string.",
+      };
+    }
+
+    if (name === "TimeOnly") {
+      return {
+        type: "string",
+        description: "Time string.",
+      };
+    }
+
+    if (name === "TimeSpan") {
+      return {
+        type: "string",
+        description: "Time span string.",
+      };
+    }
+
+    if (context.enumsByName.has(name)) {
+      return {
+        type: "string",
+        enum: context.enumsByName.get(name).values,
+      };
+    }
+
+    if (context.modelsByName.has(name)) {
+      if (name === context.rootName) {
+        return { $ref: "#" };
+      }
+
+      ensureDefinition(name, context, path, objectDepth);
+      return { $ref: `#/$defs/${name}` };
+    }
+
+    throw new SchemaConversionError(
+      "UnsupportedType",
+      path,
+      `${parsedType.raw} is not supported by the converter.`,
+    );
+  }
+
+  function ensureDefinition(typeName, context, path, depth) {
+    context.maxDepth = Math.max(context.maxDepth, depth);
+
+    if (depth > 5) {
+      throw new SchemaConversionError(
+        "ExceededNestingDepth",
+        path,
+        `Object nesting depth ${depth} exceeds the Azure OpenAI limit of 5.`,
+      );
+    }
+
+    if (context.builtDefs.has(typeName) || context.buildingDefs.has(typeName)) {
+      return;
+    }
+
+    const model = context.modelsByName.get(typeName);
+    if (!model) {
+      throw new SchemaConversionError(
+        "UnsupportedType",
+        path,
+        `${typeName} could not be resolved to a model type.`,
+      );
+    }
+
+    context.buildingDefs.add(typeName);
+    context.defs[typeName] = buildObjectSchema(model, context, path, depth);
+    context.buildingDefs.delete(typeName);
+    context.builtDefs.add(typeName);
+  }
+
+  function applyNullable(schema, nullable) {
+    if (!nullable) {
+      return schema;
+    }
+
+    if (schema.type === "string" && Array.isArray(schema.enum)) {
+      return Object.assign({}, schema, {
+        type: ["string", "null"],
+        enum: schema.enum.concat([null]),
+      });
+    }
+
+    if (
+      schema.type === "string" ||
+      schema.type === "number" ||
+      schema.type === "integer" ||
+      schema.type === "boolean"
+    ) {
+      return Object.assign({}, schema, {
+        type: [schema.type, "null"],
+      });
+    }
+
+    return {
+      anyOf: [schema, { type: "null" }],
+    };
+  }
+
+  function parseType(typeText) {
+    let text = normalizeTypeText(typeText);
+    let nullable = false;
+
+    while (text.endsWith("?")) {
+      nullable = true;
+      text = text.slice(0, -1).trim();
+    }
+
+    if (text.endsWith("[]")) {
+      return {
+        kind: "array",
+        raw: typeText.trim(),
+        nullable,
+        element: parseType(text.slice(0, -2)),
+      };
+    }
+
+    const generic = parseGenericType(text);
+    if (generic) {
+      if (generic.name === "Nullable" && generic.args.length === 1) {
+        const innerType = parseType(generic.args[0]);
+        innerType.nullable = true;
+        innerType.raw = typeText.trim();
+        return innerType;
+      }
+
+      return {
+        kind: "generic",
+        raw: typeText.trim(),
+        nullable,
+        name: getSimpleTypeName(generic.name),
+        args: generic.args.map((arg) => parseType(arg)),
+      };
+    }
+
+    return {
+      kind: "named",
+      raw: typeText.trim(),
+      nullable,
+      name: getSimpleTypeName(text),
+    };
+  }
+
+  function normalizeTypeText(typeText) {
+    return String(typeText || "")
+      .replace(/\bglobal::/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function parseGenericType(typeText) {
+    const open = typeText.indexOf("<");
+    if (open === -1 || !typeText.endsWith(">")) {
+      return null;
+    }
+
+    const close = findMatchingAngle(typeText, open);
+    if (close !== typeText.length - 1) {
+      return null;
+    }
+
+    return {
+      name: typeText.slice(0, open).trim(),
+      args: splitTopLevel(typeText.slice(open + 1, close), ",").map((arg) =>
+        arg.trim(),
+      ),
+    };
+  }
+
+  function getSimpleTypeName(name) {
+    const withoutNullableAnnotation = name.replace(/\?$/, "");
+    const parts = withoutNullableAnnotation.split(".");
+    return parts[parts.length - 1];
+  }
+
+  function validateSchemaSubset(schema) {
+    if (schema.anyOf) {
+      throw new SchemaConversionError(
+        "RootAnyOfNotAllowed",
+        "$",
+        "Root schema cannot be anyOf.",
+      );
+    }
+
+    if (schema.type !== "object") {
+      throw new SchemaConversionError(
+        "RootMustBeObject",
+        "$",
+        "Root schema must be an object.",
+      );
+    }
+
+    const defs = schema.$defs || {};
+    walkSchema(schema, "$", defs);
+  }
+
+  function walkSchema(schema, path, defs) {
+    if (!schema || typeof schema !== "object") {
+      return;
+    }
+
+    for (const key of Object.keys(schema)) {
+      if (!ALLOWED_SCHEMA_KEYS.has(key)) {
+        throw new SchemaConversionError(
+          "UnsupportedKeywordGenerated",
+          path,
+          `Generated unsupported JSON Schema keyword '${key}'.`,
+        );
+      }
+    }
+
+    if (schema.$ref) {
+      validateReference(schema.$ref, path, defs);
+      return;
+    }
+
+    validateTypeValue(schema.type, path);
+
+    if (schema.type === "object") {
+      if (schema.additionalProperties !== false) {
+        throw new SchemaConversionError(
+          "MissingAdditionalPropertiesFalse",
+          path,
+          "Every object schema must set additionalProperties: false.",
+        );
+      }
+
+      const propertyNames = Object.keys(schema.properties || {});
+      const required = schema.required || [];
+      const missing = propertyNames.filter((name) => !required.includes(name));
+      const extra = required.filter((name) => !propertyNames.includes(name));
+      if (missing.length > 0 || extra.length > 0) {
+        throw new SchemaConversionError(
+          "RequiredNotComplete",
+          path,
+          "Every object schema must include every property key in required.",
+        );
+      }
+
+      for (const propertyName of propertyNames) {
+        walkSchema(schema.properties[propertyName], `${path}.${propertyName}`, defs);
+      }
+    }
+
+    if (schema.items) {
+      walkSchema(schema.items, `${path}[]`, defs);
+    }
+
+    if (Array.isArray(schema.anyOf)) {
+      schema.anyOf.forEach((branch, index) => {
+        walkSchema(branch, `${path}.anyOf[${index}]`, defs);
+      });
+    }
+
+    if (schema.$defs) {
+      for (const [name, definition] of Object.entries(schema.$defs)) {
+        walkSchema(definition, `#/$defs/${name}`, defs);
+      }
+    }
+  }
+
+  function validateTypeValue(typeValue, path) {
+    if (typeValue === undefined) {
+      return;
+    }
+
+    if (Array.isArray(typeValue)) {
+      for (const value of typeValue) {
+        if (!ALLOWED_TYPES.has(value)) {
+          throwUnsupportedTypeValue(path, value);
+        }
+      }
+      return;
+    }
+
+    if (!ALLOWED_TYPES.has(typeValue)) {
+      throwUnsupportedTypeValue(path, typeValue);
+    }
+  }
+
+  function throwUnsupportedTypeValue(path, value) {
+    throw new SchemaConversionError(
+      "UnsupportedType",
+      path,
+      `Generated unsupported JSON Schema type '${value}'.`,
+    );
+  }
+
+  function validateReference(ref, path, defs) {
+    if (ref === "#") {
+      return;
+    }
+
+    if (!ref.startsWith("#/$defs/")) {
+      throw new SchemaConversionError(
+        "UnresolvedReference",
+        path,
+        `Reference '${ref}' is not a supported local definition reference.`,
+      );
+    }
+
+    const name = ref.slice("#/$defs/".length);
+    if (!Object.prototype.hasOwnProperty.call(defs, name)) {
+      throw new SchemaConversionError(
+        "UnresolvedReference",
+        path,
+        `Reference '${ref}' could not be resolved.`,
+      );
+    }
+  }
+
+  function maskCommentsAndStrings(source) {
+    let output = "";
+    let index = 0;
+
+    while (index < source.length) {
+      const char = source[index];
+      const next = source[index + 1];
+
+      if (char === "/" && next === "/") {
+        const end = source.indexOf("\n", index + 2);
+        if (end === -1) {
+          output += " ".repeat(source.length - index);
+          break;
+        }
+        output += " ".repeat(end - index) + "\n";
+        index = end + 1;
+        continue;
+      }
+
+      if (char === "/" && next === "*") {
+        const end = source.indexOf("*/", index + 2);
+        const stop = end === -1 ? source.length : end + 2;
+        output += source
+          .slice(index, stop)
+          .replace(/[^\r\n]/g, " ");
+        index = stop;
+        continue;
+      }
+
+      if (char === "@" && next === "\"") {
+        const end = readVerbatimStringEnd(source, index + 2);
+        output += " ".repeat(end - index);
+        index = end;
+        continue;
+      }
+
+      if (char === "\"") {
+        const end = readStringEnd(source, index + 1);
+        output += " ".repeat(end - index);
+        index = end;
+        continue;
+      }
+
+      output += char;
+      index += 1;
+    }
+
+    return output;
+  }
+
+  function readStringEnd(source, index) {
+    let escaped = false;
+    while (index < source.length) {
+      const char = source[index];
+      if (!escaped && char === "\"") {
+        return index + 1;
+      }
+      escaped = !escaped && char === "\\";
+      if (char !== "\\") {
+        escaped = false;
+      }
+      index += 1;
+    }
+    return source.length;
+  }
+
+  function readVerbatimStringEnd(source, index) {
+    while (index < source.length) {
+      if (source[index] === "\"" && source[index + 1] === "\"") {
+        index += 2;
+        continue;
+      }
+      if (source[index] === "\"") {
+        return index + 1;
+      }
+      index += 1;
+    }
+    return source.length;
+  }
+
+  function findMatchingBrace(text, openIndex) {
+    return findMatchingPair(text, openIndex, "{", "}");
+  }
+
+  function findMatchingParen(text, openIndex) {
+    return findMatchingPair(text, openIndex, "(", ")");
+  }
+
+  function findMatchingAngle(text, openIndex) {
+    return findMatchingPair(text, openIndex, "<", ">");
+  }
+
+  function findMatchingPair(text, openIndex, openChar, closeChar) {
+    let depth = 0;
+    for (let index = openIndex; index < text.length; index += 1) {
+      if (text[index] === openChar) {
+        depth += 1;
+      } else if (text[index] === closeChar) {
+        depth -= 1;
+        if (depth === 0) {
+          return index;
+        }
+      }
+    }
+    return -1;
+  }
+
+  function splitTopLevel(text, delimiter) {
+    const parts = [];
+    let depthAngle = 0;
+    let depthParen = 0;
+    let depthBracket = 0;
+    let start = 0;
+    let index = 0;
+    let inString = false;
+    let escaped = false;
+
+    while (index < text.length) {
+      const char = text[index];
+
+      if (inString) {
+        if (!escaped && char === "\"") {
+          inString = false;
+        }
+        escaped = !escaped && char === "\\";
+        if (char !== "\\") {
+          escaped = false;
+        }
+        index += 1;
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+      } else if (char === "<") {
+        depthAngle += 1;
+      } else if (char === ">") {
+        depthAngle -= 1;
+      } else if (char === "(") {
+        depthParen += 1;
+      } else if (char === ")") {
+        depthParen -= 1;
+      } else if (char === "[") {
+        depthBracket += 1;
+      } else if (char === "]") {
+        depthBracket -= 1;
+      } else if (
+        char === delimiter &&
+        depthAngle === 0 &&
+        depthParen === 0 &&
+        depthBracket === 0
+      ) {
+        parts.push(text.slice(start, index));
+        start = index + 1;
+      }
+
+      index += 1;
+    }
+
+    parts.push(text.slice(start));
+    return parts;
+  }
+
+  function stripTopLevelAssignment(text) {
+    let depthAngle = 0;
+    let depthParen = 0;
+    let depthBracket = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (!escaped && char === "\"") {
+          inString = false;
+        }
+        escaped = !escaped && char === "\\";
+        if (char !== "\\") {
+          escaped = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+      } else if (char === "<") {
+        depthAngle += 1;
+      } else if (char === ">") {
+        depthAngle -= 1;
+      } else if (char === "(") {
+        depthParen += 1;
+      } else if (char === ")") {
+        depthParen -= 1;
+      } else if (char === "[") {
+        depthBracket += 1;
+      } else if (char === "]") {
+        depthBracket -= 1;
+      } else if (
+        char === "=" &&
+        depthAngle === 0 &&
+        depthParen === 0 &&
+        depthBracket === 0
+      ) {
+        return text.slice(0, index);
+      }
+    }
+
+    return text;
+  }
+
+  function blankRanges(text, ranges) {
+    if (!ranges.length) {
+      return text;
+    }
+
+    const chars = text.split("");
+    for (const range of ranges) {
+      for (
+        let index = Math.max(0, range.start);
+        index < Math.min(chars.length, range.end);
+        index += 1
+      ) {
+        chars[index] = chars[index] === "\n" || chars[index] === "\r"
+          ? chars[index]
+          : " ";
+      }
+    }
+    return chars.join("");
+  }
+
+  function normalizeSpaces(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function formatSchema(schema) {
+    return JSON.stringify(schema, null, 2);
+  }
+
+  const api = {
+    SchemaConversionError,
+    convertCsharpToJsonSchema,
+    formatSchema,
+    parseCsharpSource,
+    parseType,
+    DEFAULT_SAMPLE,
+    EMPTY_OUTPUT,
+  };
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = api;
+  }
+
+  globalScope.CsharpSchemaConverter = api;
+
+  if (!globalScope.document || !globalScope.customElements) {
+    return;
+  }
+
   const template = document.createElement("template");
 
   template.innerHTML = `
@@ -137,4 +1365,4 @@
       CsharpJsonSchemaConverter,
     );
   }
-})(window);
+})(typeof window !== "undefined" ? window : globalThis);
