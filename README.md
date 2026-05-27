@@ -1,25 +1,50 @@
 # C# Class to JSON Schema
 
-A dependency-free Web Component for converting C# class and record models into the JSON Schema subset accepted by Azure OpenAI Structured Outputs.
+這是一個零相依的 Web Component，可將 C# `class` / `record` 模型轉換成 Azure OpenAI Structured Outputs 可接受的 JSON Schema 子集。
 
-Open [index.html](./index.html) in a browser to use the converter.
+## 使用方式
 
-## Features
+在頁面載入元件：
 
-- Parses `class`, `record class`, `record`, nested model types, and `enum`.
-- Preserves C# member order in generated `properties` and `required`.
-- Emits `additionalProperties: false` for every object schema.
-- Represents nullable scalar types with `type: [T, "null"]`.
-- Represents nullable object and array types with `anyOf`.
-- Emits `$defs` and `$ref` for referenced model classes.
-- Applies `[JsonPropertyName]`, `[JsonIgnore]`, `[Description]`, and XML summary comments where possible.
-- Highlights C# input and JSON Schema output inside the Web Component.
-- Rejects unsupported dictionary, `object`, and `dynamic` members with structured errors.
+```html
+<script type="module" src="/assets/components/csharp-schema-converter.js"></script>
+```
 
-## Local Checks
+在頁面任意位置放入標籤：
+
+```html
+<csharp-json-schema-converter></csharp-json-schema-converter>
+```
+
+如果只是本機試用，也可以直接用瀏覽器開啟 [index.html](./index.html)。
+
+## 功能
+
+- 支援解析 `class`、`record class`、`record`、巢狀模型型別與 `enum`。
+- 產生的 `properties` 與 `required` 會保留 C# 成員順序。
+- 每個 object schema 都會輸出 `additionalProperties: false`。
+- nullable scalar 會以 `type: [T, "null"]` 表示。
+- nullable object 與 array 會以 `anyOf` 表示。
+- 參考到其他模型型別時，會輸出 `$defs` 與 `$ref`。
+- 會套用 `[JsonPropertyName]`、`[JsonIgnore]`、`[Description]`，並盡量讀取 XML summary comment。
+- 內建 C# 輸入與 JSON Schema 輸出的 syntax highlighting。
+- 遇到 dictionary、`object`、`dynamic` 等無法安全轉換的型別時，會回傳結構化錯誤。
+
+## 主要限制
+
+- 不輸出 Azure OpenAI Structured Outputs 不支援的 JSON Schema 關鍵字，例如 `format`、`pattern`、`minimum`、`maximum`、`minItems`。
+- `Dictionary<TKey, TValue>` 不會直接轉成自由鍵 object，因為 Structured Outputs 要求 object 必須使用 `additionalProperties: false`。
+- root schema 必須是 object。
+- 目前轉換器以瀏覽器端靜態解析 C# source 為主，並非完整 C# compiler / Roslyn 分析器。
+
+## 本機檢查
 
 ```sh
 npm test
 ```
 
-The project uses only built-in Node.js test tooling.
+本專案只使用 Node.js 內建測試工具。
+
+## 主要參考來源
+
+- [結構化輸出 - Azure OpenAI in Microsoft Foundry Models](https://learn.microsoft.com/zh-tw/azure/foundry/openai/how-to/structured-outputs)
