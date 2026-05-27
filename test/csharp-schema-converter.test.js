@@ -5,6 +5,8 @@ const {
   SchemaConversionError,
   convertCsharpToJsonSchema,
   DEFAULT_SAMPLE,
+  highlightCsharp,
+  highlightJson,
 } = require("../src/csharp-schema-converter");
 
 test("generates a structured outputs compatible schema for the sample model", () => {
@@ -93,4 +95,21 @@ test("rejects dictionary properties with a structured error", () => {
       return true;
     },
   );
+});
+
+test("highlights csharp source while escaping html", () => {
+  const html = highlightCsharp("public string Name { get; init; } // <unsafe>");
+
+  assert.match(html, /class="token keyword">public<\/span>/);
+  assert.match(html, /class="token type">string<\/span>/);
+  assert.match(html, /&lt;unsafe&gt;/);
+});
+
+test("highlights json schema output while escaping string values", () => {
+  const html = highlightJson('{"type":"string","description":"<unsafe>","nullable":null}');
+
+  assert.match(html, /class="token key">&quot;type&quot;<\/span>/);
+  assert.match(html, /class="token string">&quot;string&quot;<\/span>/);
+  assert.match(html, /class="token literal">null<\/span>/);
+  assert.match(html, /&lt;unsafe&gt;/);
 });

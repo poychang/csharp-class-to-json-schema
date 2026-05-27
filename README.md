@@ -13,6 +13,7 @@ Open [index.html](./index.html) in a browser to use the converter.
 - Represents nullable object and array types with `anyOf`.
 - Emits `$defs` and `$ref` for referenced model classes.
 - Applies `[JsonPropertyName]`, `[JsonIgnore]`, `[Description]`, and XML summary comments where possible.
+- Highlights C# input and JSON Schema output inside the Web Component.
 - Rejects unsupported dictionary, `object`, and `dynamic` members with structured errors.
 
 ## Local Checks

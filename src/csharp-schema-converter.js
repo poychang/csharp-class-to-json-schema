@@ -46,6 +46,87 @@
     "array",
     "null",
   ]);
+  const CSHARP_KEYWORDS = new Set([
+    "abstract",
+    "as",
+    "base",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "delegate",
+    "do",
+    "else",
+    "enum",
+    "event",
+    "false",
+    "finally",
+    "for",
+    "foreach",
+    "get",
+    "if",
+    "in",
+    "init",
+    "interface",
+    "internal",
+    "is",
+    "namespace",
+    "new",
+    "null",
+    "out",
+    "override",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "record",
+    "required",
+    "return",
+    "sealed",
+    "set",
+    "static",
+    "struct",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "using",
+    "virtual",
+    "void",
+    "while",
+  ]);
+  const CSHARP_BUILTIN_TYPES = new Set([
+    "bool",
+    "byte",
+    "char",
+    "DateOnly",
+    "DateTime",
+    "DateTimeOffset",
+    "decimal",
+    "double",
+    "dynamic",
+    "float",
+    "Guid",
+    "int",
+    "long",
+    "object",
+    "sbyte",
+    "short",
+    "string",
+    "TimeOnly",
+    "TimeSpan",
+    "uint",
+    "ulong",
+    "ushort",
+  ]);
+  const CSHARP_TOKEN_PATTERN =
+    /\/\/\/[^\r\n]*|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|@"(?:""|[^"])*"|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*\b|[{}()[\];,.<>?=:+*/-]/g;
+  const JSON_TOKEN_PATTERN =
+    /"(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}[\],:]/g;
 
   const DEFAULT_OPTIONS = {
     includeFields: false,
@@ -1207,10 +1288,110 @@
     return JSON.stringify(schema, null, 2);
   }
 
+  function highlightCsharp(source) {
+    return highlightWithPattern(
+      source,
+      CSHARP_TOKEN_PATTERN,
+      classifyCsharpToken,
+    );
+  }
+
+  function highlightJson(source) {
+    return highlightWithPattern(source, JSON_TOKEN_PATTERN, classifyJsonToken);
+  }
+
+  function highlightWithPattern(source, pattern, classifyToken) {
+    const text = String(source || "");
+    let html = "";
+    let cursor = 0;
+    pattern.lastIndex = 0;
+
+    for (const match of text.matchAll(pattern)) {
+      const token = match[0];
+      const index = match.index || 0;
+      html += escapeHtml(text.slice(cursor, index));
+
+      const tokenClass = classifyToken(token, match, text);
+      if (tokenClass) {
+        html += `<span class="token ${tokenClass}">${escapeHtml(token)}</span>`;
+      } else {
+        html += escapeHtml(token);
+      }
+
+      cursor = index + token.length;
+    }
+
+    html += escapeHtml(text.slice(cursor));
+    return html || " ";
+  }
+
+  function classifyCsharpToken(token) {
+    if (token.startsWith("//") || token.startsWith("/*")) {
+      return "comment";
+    }
+
+    if (
+      token.startsWith("\"") ||
+      token.startsWith("@\"") ||
+      token.startsWith("'")
+    ) {
+      return "string";
+    }
+
+    if (/^\d/.test(token)) {
+      return "number";
+    }
+
+    if (CSHARP_KEYWORDS.has(token)) {
+      return "keyword";
+    }
+
+    if (CSHARP_BUILTIN_TYPES.has(token)) {
+      return "type";
+    }
+
+    if (/^[A-Z][A-Za-z0-9_]*$/.test(token)) {
+      return "type";
+    }
+
+    if (/^[{}()[\];,.<>?=:+*/-]$/.test(token)) {
+      return "punctuation";
+    }
+
+    return "";
+  }
+
+  function classifyJsonToken(token, match, source) {
+    if (token.startsWith("\"")) {
+      const nextText = source.slice((match.index || 0) + token.length);
+      return /^\s*:/.test(nextText) ? "key" : "string";
+    }
+
+    if (/^-?\d/.test(token)) {
+      return "number";
+    }
+
+    if (token === "true" || token === "false" || token === "null") {
+      return "literal";
+    }
+
+    return "punctuation";
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
   const api = {
     SchemaConversionError,
     convertCsharpToJsonSchema,
     formatSchema,
+    highlightCsharp,
+    highlightJson,
     parseCsharpSource,
     parseType,
     DEFAULT_SAMPLE,
@@ -1255,8 +1436,9 @@
         font-weight: 680;
       }
 
-      textarea,
-      pre {
+      .editor-shell,
+      .output-shell {
+        position: relative;
         box-sizing: border-box;
         width: 100%;
         min-height: 560px;
@@ -1266,28 +1448,106 @@
         background: #ffffff;
         color: #172033;
         font: 0.92rem/1.52 "Cascadia Code", "Fira Code", Consolas, monospace;
+        overflow: hidden;
       }
 
-      textarea {
-        display: block;
-        padding: 16px;
+      .editor-shell {
+        height: 560px;
         resize: vertical;
       }
 
-      textarea:focus {
+      .editor-shell:focus-within {
         border-color: #2f6feb;
         box-shadow: 0 0 0 3px rgba(47, 111, 235, 0.15);
-        outline: none;
       }
 
-      .output-shell {
-        position: relative;
-      }
-
+      textarea,
       pre {
+        font: inherit;
+        tab-size: 2;
+      }
+
+      textarea,
+      .highlight-layer {
+        position: absolute;
+        inset: 0;
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 0;
+        padding: 16px;
+        white-space: pre;
+        overflow: auto;
+      }
+
+      textarea {
+        z-index: 1;
+        display: block;
+        background: transparent;
+        color: transparent;
+        caret-color: #172033;
+        outline: none;
+        resize: none;
+      }
+
+      textarea::selection {
+        background: rgba(47, 111, 235, 0.24);
+        color: transparent;
+      }
+
+      .highlight-layer {
+        z-index: 0;
+        pointer-events: none;
+        scrollbar-width: none;
+      }
+
+      .highlight-layer::-webkit-scrollbar {
+        display: none;
+      }
+
+      #output {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: inherit;
+        margin: 0;
+        border: 0;
+        background: transparent;
+        color: #172033;
         overflow: auto;
         padding: 48px 16px 16px;
         white-space: pre;
+      }
+
+      .token.keyword {
+        color: #7a3fb0;
+        font-weight: 700;
+      }
+
+      .token.type {
+        color: #1558a6;
+      }
+
+      .token.string {
+        color: #176844;
+      }
+
+      .token.number,
+      .token.literal {
+        color: #9a4d00;
+      }
+
+      .token.comment {
+        color: #687385;
+        font-style: italic;
+      }
+
+      .token.key {
+        color: #0f6a78;
+      }
+
+      .token.punctuation {
+        color: #59657a;
       }
 
       button {
@@ -1326,9 +1586,14 @@
         outline-offset: 2px;
       }
 
-      .output-shell[data-state="error"] pre {
+      .output-shell[data-state="error"] {
         border-color: #d45142;
         background: #fff7f5;
+        color: #5b1d16;
+      }
+
+      .output-shell[data-state="error"] #output,
+      .output-shell[data-state="error"] .token {
         color: #5b1d16;
       }
 
@@ -1342,9 +1607,14 @@
           grid-template-columns: 1fr;
         }
 
-        textarea,
-        pre {
+        .editor-shell,
+        .output-shell {
           min-height: 420px;
+          height: 420px;
+        }
+
+        .output-shell {
+          height: auto;
         }
       }
     </style>
@@ -1352,7 +1622,10 @@
     <section class="converter">
       <div class="pane">
         <label for="source">C# Class</label>
-        <textarea id="source" spellcheck="false"></textarea>
+        <div class="editor-shell">
+          <pre id="source-highlight" class="highlight-layer" aria-hidden="true"></pre>
+          <textarea id="source" spellcheck="false" wrap="off"></textarea>
+        </div>
       </div>
       <div class="pane">
         <span class="output-label">JSON Schema</span>
@@ -1377,10 +1650,12 @@
       this.copyTimer = 0;
       this.handleInput = this.handleInput.bind(this);
       this.handleCopy = this.handleCopy.bind(this);
+      this.handleSourceScroll = this.handleSourceScroll.bind(this);
     }
 
     connectedCallback() {
       this.source = this.shadowRoot.getElementById("source");
+      this.sourceHighlight = this.shadowRoot.getElementById("source-highlight");
       this.output = this.shadowRoot.getElementById("output");
       this.outputShell = this.shadowRoot.querySelector(".output-shell");
       this.copyButton = this.shadowRoot.querySelector("button");
@@ -1390,18 +1665,32 @@
       }
 
       this.source.addEventListener("input", this.handleInput);
+      this.source.addEventListener("scroll", this.handleSourceScroll);
       this.copyButton.addEventListener("click", this.handleCopy);
+      this.updateInputHighlight();
       this.updateSchema();
     }
 
     disconnectedCallback() {
       this.source.removeEventListener("input", this.handleInput);
+      this.source.removeEventListener("scroll", this.handleSourceScroll);
       this.copyButton.removeEventListener("click", this.handleCopy);
       clearTimeout(this.copyTimer);
     }
 
     handleInput() {
+      this.updateInputHighlight();
       this.updateSchema();
+    }
+
+    handleSourceScroll() {
+      this.sourceHighlight.scrollTop = this.source.scrollTop;
+      this.sourceHighlight.scrollLeft = this.source.scrollLeft;
+    }
+
+    updateInputHighlight() {
+      this.sourceHighlight.innerHTML = `${highlightCsharp(this.source.value)}\n`;
+      this.handleSourceScroll();
     }
 
     updateSchema() {
@@ -1418,12 +1707,13 @@
       try {
         const schema = convertCsharpToJsonSchema(input);
         this.currentSchemaText = formatSchema(schema);
-        this.output.textContent = this.currentSchemaText;
+        this.output.innerHTML = highlightJson(this.currentSchemaText);
         this.outputShell.dataset.state = "ready";
         this.copyButton.disabled = false;
       } catch (error) {
+        const errorText = formatSchema(formatConversionError(error));
         this.currentSchemaText = "";
-        this.output.textContent = formatSchema(formatConversionError(error));
+        this.output.innerHTML = highlightJson(errorText);
         this.outputShell.dataset.state = "error";
         this.copyButton.disabled = true;
       }
