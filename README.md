@@ -1,6 +1,6 @@
 # C# Class to JSON Schema
 
-這是一個零相依的 Web Component，可將 C# `class` / `record` 模型轉換成 Azure OpenAI Structured Outputs 可接受的 JSON Schema 子集。
+這是一個零相依的 Web Component，可將 C# `class` / `record` 模型轉換成 Azure OpenAI Structured Outputs 可接受的 JSON Schema 子集，也提供 MAF response format 包裝元件。
 
 ## 使用方式
 
@@ -16,6 +16,25 @@
 <csharp-json-schema-converter></csharp-json-schema-converter>
 ```
 
+如果要輸出 MAF response format，改載入 MAF 元件並放入 `<csharp-schema--maf-converter>`：
+
+```html
+<script type="module" src="/assets/components/csharp-schema-maf-converter.js"></script>
+
+<csharp-schema--maf-converter></csharp-schema--maf-converter>
+```
+
+MAF 元件會額外顯示 `name` 與 `description` 欄位，並輸出下列結構，其中 `strict` 固定為 `true`：
+
+```json
+{
+  "name": "NameOfResponseFormat",
+  "description": "description of what the response format is for",
+  "schema": {},
+  "strict": true
+}
+```
+
 如果需要在 JavaScript 中直接使用轉換函式，可用 ESM import：
 
 ```js
@@ -26,6 +45,20 @@ import {
 
 const schema = convertCsharpToJsonSchema(csharpSource);
 console.log(formatSchema(schema));
+```
+
+MAF helper 也可用 ESM import：
+
+```js
+import {
+  convertCsharpToMafResponseFormat,
+} from "/assets/components/csharp-schema-maf-converter.js";
+
+const responseFormat = convertCsharpToMafResponseFormat(csharpSource, {
+  name: "NameOfResponseFormat",
+  description: "description of what the response format is for",
+});
+console.log(JSON.stringify(responseFormat, null, 2));
 ```
 
 如果只是本機試用，也可以直接用瀏覽器開啟 [index.html](./index.html)。
