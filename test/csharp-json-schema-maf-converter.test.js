@@ -8,7 +8,7 @@ import {
 import {
   convertCsharpToMafResponseFormat,
   normalizeResponseFormatMetadata,
-} from "../src/csharp-schema-maf-converter.js";
+} from "../src/csharp-json-schema-maf-converter.js";
 
 test("wraps generated schema in a MAF response format", () => {
   const responseFormat = convertCsharpToMafResponseFormat(DEFAULT_SAMPLE, {
