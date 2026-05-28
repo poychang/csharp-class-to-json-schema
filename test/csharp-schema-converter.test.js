@@ -7,7 +7,7 @@ import {
   DEFAULT_SAMPLE,
   highlightCsharp,
   highlightJson,
-} from "../src/csharp-schema-converter.js";
+} from "../src/csharp-json-schema-converter.js";
 
 test("generates a structured outputs compatible schema for the sample model", () => {
   const schema = convertCsharpToJsonSchema(DEFAULT_SAMPLE);

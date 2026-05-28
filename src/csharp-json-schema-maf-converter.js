@@ -5,7 +5,7 @@ import {
   highlightCsharp,
   highlightJson,
   DEFAULT_SAMPLE,
-} from "./csharp-schema-converter.js";
+} from "./csharp-json-schema-converter.js";
 
 const RESPONSE_FORMAT_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAF_EMPTY_OUTPUT =
@@ -484,9 +484,9 @@ if (globalScope.document && globalScope.customElements) {
     }
   }
 
-  if (!customElements.get("csharp-schema--maf-converter")) {
+  if (!customElements.get("csharp-json-schema-maf-converter")) {
     customElements.define(
-      "csharp-schema--maf-converter",
+      "csharp-json-schema-maf-converter",
       CsharpSchemaMafConverter,
     );
   }

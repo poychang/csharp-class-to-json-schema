@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   SchemaConversionError,
   DEFAULT_SAMPLE,
-} from "../src/csharp-schema-converter.js";
+} from "../src/csharp-json-schema-converter.js";
 import {
   convertCsharpToMafResponseFormat,
   normalizeResponseFormatMetadata,
